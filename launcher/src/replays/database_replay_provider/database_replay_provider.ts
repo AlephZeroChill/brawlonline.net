@@ -464,8 +464,10 @@ export class DatabaseReplayProvider implements ReplayProvider {
 
     for await (const progress of streamGen) {
       totalScanned = progress.scanned;
-      slpFileNames.length = 0;
-      slpFileNames.push(...progress.slpFiles);
+      // One at a time: push(...names) throws a RangeError past ~120,000 arguments.
+      for (const name of progress.newSlpFiles) {
+        slpFileNames.push(name);
+      }
 
       // Log intermediate progress for large directories
       if (!progress.complete && totalScanned % 1000 === 0) {

@@ -13,7 +13,8 @@ export interface FolderScanProgress {
 
 export interface FileScanProgress {
   scanned: number;
-  slpFiles: string[];
+  /** The replay files found since the previous progress update (each file is in exactly one). */
+  newSlpFiles: string[];
   complete: boolean;
 }
 
@@ -108,11 +109,11 @@ export async function listSubFoldersAsync(folder: string): Promise<FolderResult[
  *
  * @param folder - The folder path to scan for .slp files
  * @param chunkSize - How many entries to scan before yielding progress (default: 200)
- * @yields Progress updates with discovered .slp filenames
+ * @yields Progress updates, each with the .slp filenames discovered since the previous one
  */
 export async function* streamSlpFiles(folder: string, chunkSize = 200): AsyncGenerator<FileScanProgress> {
   let scanned = 0;
-  const slpFiles: string[] = [];
+  let slpFiles: string[] = [];
 
   try {
     const dir = await fs.promises.opendir(folder);
@@ -128,19 +129,20 @@ export async function* streamSlpFiles(folder: string, chunkSize = 200): AsyncGen
       if (scanned % chunkSize === 0) {
         yield {
           scanned,
-          slpFiles: [...slpFiles],
+          newSlpFiles: slpFiles,
           complete: false,
         };
+        slpFiles = [];
       }
     }
   } catch (err) {
     console.warn(`Error reading directory ${folder}:`, err);
   }
 
-  // Final yield with all discovered files
+  // Final yield with the files discovered since the last one
   yield {
     scanned,
-    slpFiles,
+    newSlpFiles: slpFiles,
     complete: true,
   };
 }
