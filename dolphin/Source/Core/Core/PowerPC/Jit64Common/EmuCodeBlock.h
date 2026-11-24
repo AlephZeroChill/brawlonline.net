@@ -118,8 +118,15 @@ public:
   bool WriteClobbersRegValue(int accessSize, bool swap);
 
   // returns true if an exception could have been caused
-  bool WriteToConstAddress(int accessSize, Gen::OpArg arg, u32 address, BitSet32 registersInUse);
+  bool WriteToConstAddress(int accessSize, Gen::OpArg arg, u32 address, BitSet32 registersInUse,
+                           bool swap = true);
   void WriteToConstRamAddress(int accessSize, Gen::OpArg arg, u32 address, bool swap = true);
+
+  // fcmpu/fcmpo of a (the operand) with b (in a register) without branches: the CR field's
+  // internal value to cr_dst and, when lazy_dst is given, the FPCC bits to that byte. Clobbers
+  // RSCRATCH and RSCRATCH2.
+  void EmitBranchlessFloatCompare(Gen::X64Reg b, const Gen::OpArg& a, const Gen::OpArg& cr_dst,
+                                  const Gen::OpArg* lazy_dst);
 
   void JitGetAndClearCAOV(bool oe);
   void JitSetCA();

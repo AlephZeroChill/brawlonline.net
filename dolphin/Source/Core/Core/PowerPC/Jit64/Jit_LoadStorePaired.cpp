@@ -36,6 +36,43 @@ void Jit64::psq_stXX(UGeckoInstruction inst)
 
   FlushRegistersBeforeSlowAccess();
 
+  const bool gqrIsConstant = js.constantGqrValid[i];
+  if (gqrIsConstant && !indexed && gpr.IsImm(a))
+  {
+    const u32 gqrValue = js.constantGqr[i] & 0xffff;
+    const int type = gqrValue & 0x7;
+    const u32 addr = gpr.Imm32(a) + offset;
+
+    {
+      RCOpArg Rs = fpr.Use(s, RCMode::Read);
+      RegCache::Realize(Rs);
+
+      if (w)
+        CVTSD2SS(XMM0, Rs);  // one
+      else
+        CVTPD2PS(XMM0, Rs);  // pair
+    }
+
+    const bool exception =
+        GenQuantizedStore(w != 0, static_cast<EQuantizeType>(type), (gqrValue & 0x3F00) >> 8, addr,
+                          CallerSavedRegistersInUse());
+    if (update)
+    {
+      if (!jo.memcheck || !exception)
+      {
+        gpr.SetImmediate32(a, addr);
+      }
+      else
+      {
+        RCOpArg Ra = gpr.RevertableBind(a, RCMode::Write);
+        RegCache::Realize(Ra);
+        MemoryExceptionCheck();
+        MOV(32, Ra, Imm32(addr));
+      }
+    }
+    return;
+  }
+
   RCX64Reg scratch_guard = gpr.Scratch(RSCRATCH_EXTRA);
   RCOpArg Ra = update ? gpr.Bind(a, RCMode::ReadWrite) : gpr.Use(a, RCMode::Read);
   RCOpArg Rb = indexed ? gpr.Use(b, RCMode::Read) : RCOpArg::Imm32((u32)offset);
@@ -53,34 +90,11 @@ void Jit64::psq_stXX(UGeckoInstruction inst)
   else
     CVTPD2PS(XMM0, Rs);  // pair
 
-  const bool gqrIsConstant = js.constantGqrValid[i];
   if (gqrIsConstant)
   {
     const u32 gqrValue = js.constantGqr[i] & 0xffff;
-    int type = gqrValue & 0x7;
-
-    // Paired stores (other than w/type zero) don't yield any real change in
-    // performance right now, but if we can improve fastmem support this might change
-    if (gqrValue == 0)
-    {
-      if (w)
-        GenQuantizedStore(true, static_cast<EQuantizeType>(type), (gqrValue & 0x3F00) >> 8);
-      else
-        GenQuantizedStore(false, static_cast<EQuantizeType>(type), (gqrValue & 0x3F00) >> 8);
-    }
-    else
-    {
-      FlushPCBeforeSlowAccess();
-
-      // We know what GQR is here, so we can load RSCRATCH2 and call into the store method directly
-      // with just the scale bits.
-      MOV(32, R(RSCRATCH2), Imm32(gqrValue & 0x3F00));
-
-      if (w)
-        CALL(asm_routines.single_store_quantized[type]);
-      else
-        CALL(asm_routines.paired_store_quantized[type]);
-    }
+    const int type = gqrValue & 0x7;
+    GenQuantizedStore(w != 0, static_cast<EQuantizeType>(type), (gqrValue & 0x3F00) >> 8);
   }
   else
   {

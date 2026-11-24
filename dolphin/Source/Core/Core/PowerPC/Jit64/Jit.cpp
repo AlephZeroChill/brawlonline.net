@@ -1458,9 +1458,11 @@ void Jit64::PlanDirtyMarks(std::span<const PPCAnalyst::CodeOp> ops,
     s32 leader = -1;
     s32 first = 0;
     s32 last = 0;
+    s32 delta = 0;  // current (base - base_at_leader) from updating stores and addi rA, rA, imm
     u32 stores = 0;
     bool multiple = false;  // led by an stmw, which shares its marks across its registers
   };
+  constexpr s64 MAX_DISP = 0x40000000;
   std::array<Group, 32> groups{};
   const auto close = [&](u32 base) {
     Group& group = groups[base];
@@ -1482,47 +1484,99 @@ void Jit64::PlanDirtyMarks(std::span<const PPCAnalyst::CodeOp> ops,
         close(base);
     }
 
-    // D-form stores without update, through a base register: the bytes [base + d, + size).
+    // D-form stores (with or without update) through a base register: [base + d, + size).
     s32 size = 0;
+    s32 disp = static_cast<s16>(inst.SIMM_16);
+    bool update = false;
     switch (inst.OPCD)
     {
     case 36:  // stw
     case 52:  // stfs
       size = 4;
       break;
+    case 37:  // stwu
+    case 53:  // stfsu
+      size = 4;
+      update = true;
+      break;
     case 38:  // stb
       size = 1;
+      break;
+    case 39:  // stbu
+      size = 1;
+      update = true;
       break;
     case 44:  // sth
       size = 2;
       break;
+    case 45:  // sthu
+      size = 2;
+      update = true;
+      break;
     case 54:  // stfd
       size = 8;
+      break;
+    case 55:  // stfdu
+      size = 8;
+      update = true;
       break;
     case 47:  // stmw
       size = (32 - static_cast<s32>(inst.RS)) * 4;
       break;
+    case 60:  // psq_st (at most 4 bytes if W=1, 8 bytes if W=0 across all GQR types)
+      size = inst.W ? 4 : 8;
+      disp = static_cast<s32>(inst.SIMM_12);
+      break;
+    case 61:  // psq_stu
+      size = inst.W ? 4 : 8;
+      disp = static_cast<s32>(inst.SIMM_12);
+      update = true;
+      break;
     default:
       break;
     }
+
+    u32 tracked_base = 32;
     if (size != 0 && inst.RA != 0 && !op.skip)
     {
       const u32 base = inst.RA;
-      const s32 first = static_cast<s16>(inst.SIMM_16);
-      const s32 last = first + size - 1;
       Group& group = groups[base];
-      if (group.leader >= 0 && std::max(last, group.last) - std::min(first, group.first) <
-                                   static_cast<s32>(ROLLBACK_PAGE_SIZE))
+      const s64 cur_delta = group.leader >= 0 ? static_cast<s64>(group.delta) : 0;
+      const s64 first = cur_delta + disp;
+      const s64 last = first + size - 1;
+      const s64 new_first = group.leader >= 0 ? std::min<s64>(first, group.first) : first;
+      const s64 new_last = group.leader >= 0 ? std::max<s64>(last, group.last) : last;
+      const s64 next_delta = cur_delta + (update ? disp : 0);
+      if (group.leader >= 0 && new_last - new_first < static_cast<s64>(ROLLBACK_PAGE_SIZE) &&
+          new_first >= -MAX_DISP && new_last <= MAX_DISP && next_delta >= -MAX_DISP &&
+          next_delta <= MAX_DISP)
       {
-        group.first = std::min(first, group.first);
-        group.last = std::max(last, group.last);
+        group.first = static_cast<s32>(new_first);
+        group.last = static_cast<s32>(new_last);
+        group.delta = static_cast<s32>(next_delta);
         ++group.stores;
         plan[i].kind = DirtyMarkPlan::Kind::Covered;
       }
       else
       {
         close(base);
-        group = {static_cast<s32>(i), first, last, 1, inst.OPCD == 47};
+        group = {static_cast<s32>(i), disp, disp + size - 1, update ? disp : 0, 1, inst.OPCD == 47};
+      }
+      if (update)
+        tracked_base = base;
+    }
+    else if (inst.OPCD == 14 && inst.RD == inst.RA && inst.RA != 0 && !op.skip)
+    {
+      // addi rA, rA, SIMM_16: advance the base offset without ending the active store group.
+      Group& group = groups[inst.RA];
+      if (group.leader >= 0)
+      {
+        const s64 next_delta = static_cast<s64>(group.delta) + static_cast<s16>(inst.SIMM_16);
+        if (next_delta >= -MAX_DISP && next_delta <= MAX_DISP)
+        {
+          group.delta = static_cast<s32>(next_delta);
+          tracked_base = inst.RA;
+        }
       }
     }
 
@@ -1534,7 +1588,10 @@ void Jit64::PlanDirtyMarks(std::span<const PPCAnalyst::CodeOp> ops,
         close(base);
     }
     for (const int reg : op.regsOut)
-      close(static_cast<u32>(reg));
+    {
+      if (static_cast<u32>(reg) != tracked_base)
+        close(static_cast<u32>(reg));
+    }
   }
   for (u32 base = 0; base < 32; ++base)
     close(base);
@@ -1545,8 +1602,14 @@ void Jit64::EmitPlannedDirtyMarks(const DirtyMarkPlan& plan)
   if (gpr.IsImm(plan.base))
   {
     const u32 base = gpr.Imm32(plan.base);
-    EmitJITDirtyBitmapConstRangeUpdate(base + static_cast<u32>(plan.first),
-                                       base + static_cast<u32>(plan.last));
+    const u32 first_addr = base + static_cast<u32>(plan.first);
+    const u32 last_addr = base + static_cast<u32>(plan.last);
+    if (jo.optimizeGatherPipe && m_mmu.IsOptimizableGatherPipeWrite(first_addr) &&
+        last_addr - first_addr < 8)
+    {
+      return;
+    }
+    EmitJITDirtyBitmapConstRangeUpdate(first_addr, last_addr);
     return;
   }
   // Between instructions only RSCRATCH and RSCRATCH2 are free; the marks borrow them.

@@ -26,7 +26,6 @@ alignas(16) static const u64 psAbsMask[2] = {0x7FFFFFFFFFFFFFFFULL, 0xFFFFFFFFFF
 alignas(16) static const u64 psAbsMask2[2] = {0x7FFFFFFFFFFFFFFFULL, 0x7FFFFFFFFFFFFFFFULL};
 alignas(16) static const u64 psGeneratedQNaN[2] = {0x7FF8000000000000ULL, 0x7FF8000000000000ULL};
 alignas(16) static const double half_qnan_and_s32_max[2] = {0x7FFFFFFF, -0x80000};
-
 // We can avoid calculating FPRF if it's not needed; every float operation resets it, so
 // if it's going to be clobbered in a future instruction before being read, we can just
 // not calculate it.
@@ -1132,12 +1131,14 @@ void Jit64::FloatCompare(UGeckoInstruction inst, bool upper)
   int output[4] = {PowerPC::CR_SO, PowerPC::CR_EQ, PowerPC::CR_GT, PowerPC::CR_LT};
 
   // Merge neighboring fcmp and cror (the primary use of cror).
+  bool merged_cror = false;
   UGeckoInstruction next = js.op[1].inst;
   if (analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CROR_MERGE) &&
       CanMergeNextInstructions(1) && next.OPCD == 19 && next.SUBOP10 == 449 &&
       static_cast<u32>(next.CRBA >> 2) == crf && static_cast<u32>(next.CRBB >> 2) == crf &&
       static_cast<u32>(next.CRBD >> 2) == crf)
   {
+    merged_cror = true;
     js.skipInstructions = 1;
     js.downcountAmount++;
     int dst = 3 - (next.CRBD & 3);
@@ -1155,6 +1156,22 @@ void Jit64::FloatCompare(UGeckoInstruction inst, bool upper)
   if (lazy)
     fprf = false;
   const OpArg lazy_compare = MDisp(RPPCSTATE, PPCSTATE_OFF(fprf_lazy) + 1);
+
+  if (!merged_cror && !fprf)
+  {
+    // No branches: the result picks the CR value (and the lazy FPCC byte) from a table.
+    if (upper)
+    {
+      MOVHLPS(XMM0, Ra.GetSimpleReg());
+      MOVHLPS(XMM1, Rb);
+      EmitBranchlessFloatCompare(XMM1, R(XMM0), PPCSTATE_CR(crf), lazy ? &lazy_compare : nullptr);
+    }
+    else
+    {
+      EmitBranchlessFloatCompare(Rb, Ra, PPCSTATE_CR(crf), lazy ? &lazy_compare : nullptr);
+    }
+    return;
+  }
 
   if (fprf)
     AND(32, PPCSTATE(fpscr), Imm32(~FPCC_MASK));

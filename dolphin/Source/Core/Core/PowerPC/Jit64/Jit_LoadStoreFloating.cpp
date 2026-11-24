@@ -119,15 +119,17 @@ void Jit64::stfXXX(UGeckoInstruction inst)
     }
     else
     {
-      RCX64Reg Rs = fpr.Bind(s, RCMode::Read);
-      RegCache::Realize(Rs);
-      MOVAPD(XMM0, Rs);
       if (cpu_info.bBMI2FastParallelBitOps)
       {
         // asm_routines.cdts's common case in place, same instructions and bits (the exponent is
         // under 2^12, so 32-bit arithmetic agrees with the routine's 16-bit); a double in the
-        // single denormal range calls the routine, which starts over from XMM0.
-        MOVQ_xmm(R(RSCRATCH), XMM0);
+        // single denormal range loads XMM0 in far code and calls the routine.
+        RCOpArg Rs = fpr.Use(s, RCMode::Read);
+        RegCache::Realize(Rs);
+        if (Rs.IsSimpleReg())
+          MOVQ_xmm(R(RSCRATCH), Rs.GetSimpleReg());
+        else
+          MOV(64, R(RSCRATCH), Rs);
         MOV(64, R(RSCRATCH2), R(RSCRATCH));
         SHR(64, R(RSCRATCH), Imm8(52));
         AND(32, R(RSCRATCH), Imm32(0x7ff));
@@ -138,6 +140,7 @@ void Jit64::stfXXX(UGeckoInstruction inst)
         PEXT(64, RSCRATCH, RSCRATCH2, R(RSCRATCH));
         SwitchToFarCode();
         SetJumpTarget(denormal);
+        MOVQ_xmm(XMM0, R(RSCRATCH2));
         CALL(asm_routines.cdts);
         FixupBranch back = J(Jump::Near);
         SwitchToNearCode();
@@ -145,6 +148,9 @@ void Jit64::stfXXX(UGeckoInstruction inst)
       }
       else
       {
+        RCX64Reg Rs = fpr.Bind(s, RCMode::Read);
+        RegCache::Realize(Rs);
+        MOVAPD(XMM0, Rs);
         CALL(asm_routines.cdts);
       }
     }

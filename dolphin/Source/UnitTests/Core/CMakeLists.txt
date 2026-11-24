@@ -27,6 +27,7 @@ if(_M_X86_64)
     PowerPC/Jit64Common/Fres.cpp
     PowerPC/Jit64Common/FPRF.cpp
     PowerPC/Jit64Common/Frsqrte.cpp
+    PowerPC/Jit64Common/GuestCodeOptsTest.cpp
     PowerPC/Jit64Common/MaddExactProduct.cpp
     PowerPC/Jit64Common/MaddTieFastPath.cpp
     PowerPC/Jit64Common/PsMaddEft.cpp
