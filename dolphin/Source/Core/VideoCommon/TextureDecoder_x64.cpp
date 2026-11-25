@@ -847,30 +847,35 @@ static void TexDecoder_DecodeImpl_RGB5A3_SSSE3(u32* dst, const u8* src, int widt
         }
         else
         {
-          // TODO: Vectorise (Either 4-way branch or do both and select is better than this)
-          u32* vals = (u32*)&valV;
-          int r, g, b, a;
-          for (int i = 0; i < 4; ++i)
-          {
-            if (vals[i] & 0x8000)
-            {
-              // Swizzle bits: 00012345 -> 12345123
-              r = (((vals[i] >> 10) & 0x1f) << 3) | (((vals[i] >> 10) & 0x1f) >> 2);
-              g = (((vals[i] >> 5) & 0x1f) << 3) | (((vals[i] >> 5) & 0x1f) >> 2);
-              b = (((vals[i]) & 0x1f) << 3) | (((vals[i]) & 0x1f) >> 2);
-              a = 0xFF;
-            }
-            else
-            {
-              a = (((vals[i] >> 12) & 0x7) << 5) | (((vals[i] >> 12) & 0x7) << 2) |
-                  (((vals[i] >> 12) & 0x7) >> 1);
-              // Swizzle bits: 00001234 -> 12341234
-              r = (((vals[i] >> 8) & 0xf) << 4) | ((vals[i] >> 8) & 0xf);
-              g = (((vals[i] >> 4) & 0xf) << 4) | ((vals[i] >> 4) & 0xf);
-              b = (((vals[i]) & 0xf) << 4) | ((vals[i]) & 0xf);
-            }
-            newdst[i] = r | (g << 8) | (b << 16) | (a << 24);
-          }
+          // Mixed row: decode both formats and pick per pixel by bit 15.
+          const __m128i is_555 = _mm_srai_epi32(_mm_slli_epi32(valV, 16), 31);
+
+          const __m128i tmpr5 = _mm_and_si128(_mm_srli_epi16(valV, 10), kMask_x1f);
+          const __m128i r5 = _mm_or_si128(_mm_slli_epi16(tmpr5, 3), _mm_srli_epi16(tmpr5, 2));
+          const __m128i tmpg5 = _mm_and_si128(_mm_srli_epi16(valV, 5), kMask_x1f);
+          const __m128i g5 = _mm_or_si128(_mm_slli_epi16(tmpg5, 3), _mm_srli_epi16(tmpg5, 2));
+          const __m128i tmpb5 = _mm_and_si128(valV, kMask_x1f);
+          const __m128i b5 = _mm_or_si128(_mm_slli_epi16(tmpb5, 3), _mm_srli_epi16(tmpb5, 2));
+          const __m128i rgb555 = _mm_or_si128(_mm_or_si128(r5, _mm_slli_epi32(g5, 8)),
+                                              _mm_or_si128(_mm_slli_epi32(b5, 16), aVxff00));
+
+          const __m128i tmpr4 = _mm_and_si128(_mm_srli_epi16(valV, 8), kMask_x0f);
+          const __m128i r4 = _mm_or_si128(_mm_slli_epi16(tmpr4, 4), tmpr4);
+          const __m128i tmpg4 = _mm_and_si128(_mm_srli_epi16(valV, 4), kMask_x0f);
+          const __m128i g4 = _mm_or_si128(_mm_slli_epi16(tmpg4, 4), tmpg4);
+          const __m128i tmpb4 = _mm_and_si128(valV, kMask_x0f);
+          const __m128i b4 = _mm_or_si128(_mm_slli_epi16(tmpb4, 4), tmpb4);
+          const __m128i tmpa3 = _mm_and_si128(_mm_srli_epi16(valV, 12), kMask_x07);
+          const __m128i a3 =
+              _mm_or_si128(_mm_slli_epi16(tmpa3, 5),
+                           _mm_or_si128(_mm_slli_epi16(tmpa3, 2), _mm_srli_epi16(tmpa3, 1)));
+          const __m128i rgba4443 =
+              _mm_or_si128(_mm_or_si128(r4, _mm_slli_epi32(g4, 8)),
+                           _mm_or_si128(_mm_slli_epi32(b4, 16), _mm_slli_epi32(a3, 24)));
+
+          const __m128i final =
+              _mm_or_si128(_mm_and_si128(is_555, rgb555), _mm_andnot_si128(is_555, rgba4443));
+          _mm_storeu_si128((__m128i*)newdst, final);
         }
       }
     }

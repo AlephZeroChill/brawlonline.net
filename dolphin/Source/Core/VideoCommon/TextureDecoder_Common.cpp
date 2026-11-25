@@ -7,6 +7,7 @@
 #include <span>
 
 #include "Common/CommonTypes.h"
+#include "Common/Intrinsics.h"
 #include "Common/MsgHandler.h"
 #include "Common/SpanUtils.h"
 #include "Common/Swap.h"
@@ -704,10 +705,62 @@ void TexDecoder_DecodeXFB(u8* dst, const u8* src, u32 width, u32 height, u32 str
   const u8* src_ptr = src;
   u8* dst_ptr = dst;
 
+#if defined(_M_X86_64)
+  const __m128 kY = _mm_set1_ps(1.164f);
+  const __m128 kRV = _mm_set1_ps(1.596f);
+  const __m128 kGU = _mm_set1_ps(0.392f);
+  const __m128 kGV = _mm_set1_ps(0.813f);
+  const __m128 kBU = _mm_set1_ps(2.017f);
+  const __m128i k16 = _mm_set1_epi32(16);
+  const __m128i k128 = _mm_set1_epi32(128);
+  const __m128i kAlpha = _mm_set1_epi8(static_cast<char>(0xFF));
+  const __m128i kZero = _mm_setzero_si128();
+#endif
+
   for (u32 y = 0; y < height; y++)
   {
     const u8* row_ptr = src_ptr;
-    for (u32 x = 0; x < width; x += 2)
+    u32 x = 0;
+
+#if defined(_M_X86_64)
+    for (; x + 4 <= width; x += 4)
+    {
+      // Load 8 bytes: [Y0, U0, Y1, V0, Y2, U1, Y3, V1]
+      const __m128i raw8 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(row_ptr));
+      row_ptr += 8;
+
+      // Expand bytes to 16-bit lanes: [Y0, U0, Y1, V0, Y2, U1, Y3, V1]
+      const __m128i w = _mm_unpacklo_epi8(raw8, kZero);
+      // Extract Y as 4x32-bit ints (even 16-bit lanes masked to 16 bits): [Y0, Y1, Y2, Y3]
+      const __m128i y_i32 = _mm_sub_epi32(_mm_and_si128(w, _mm_set1_epi32(0xFFFF)), k16);
+      // Extract UV as 4x32-bit ints (odd 16-bit lanes): [U0, V0, U1, V1]
+      const __m128i uv_i32 = _mm_sub_epi32(_mm_srli_epi32(w, 16), k128);
+      const __m128i u_i32 = _mm_shuffle_epi32(uv_i32, _MM_SHUFFLE(2, 2, 0, 0));
+      const __m128i v_i32 = _mm_shuffle_epi32(uv_i32, _MM_SHUFFLE(3, 3, 1, 1));
+
+      const __m128 y_scaled = _mm_mul_ps(kY, _mm_cvtepi32_ps(y_i32));
+      const __m128 u_f = _mm_cvtepi32_ps(u_i32);
+      const __m128 v_f = _mm_cvtepi32_ps(v_i32);
+
+      const __m128 r_f = _mm_add_ps(y_scaled, _mm_mul_ps(kRV, v_f));
+      const __m128 g_f = _mm_sub_ps(_mm_sub_ps(y_scaled, _mm_mul_ps(kGU, u_f)),
+                                    _mm_mul_ps(kGV, v_f));
+      const __m128 b_f = _mm_add_ps(y_scaled, _mm_mul_ps(kBU, u_f));
+
+      // Truncate to int and clamp [0, 255] via saturated packs (exact match to std::clamp).
+      const __m128i r_u8 = _mm_packus_epi16(_mm_packs_epi32(_mm_cvttps_epi32(r_f), kZero), kZero);
+      const __m128i g_u8 = _mm_packus_epi16(_mm_packs_epi32(_mm_cvttps_epi32(g_f), kZero), kZero);
+      const __m128i b_u8 = _mm_packus_epi16(_mm_packs_epi32(_mm_cvttps_epi32(b_f), kZero), kZero);
+
+      const __m128i rg = _mm_unpacklo_epi8(r_u8, g_u8);
+      const __m128i ba = _mm_unpacklo_epi8(b_u8, kAlpha);
+      const __m128i rgba = _mm_unpacklo_epi16(rg, ba);
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(dst_ptr), rgba);
+      dst_ptr += 16;
+    }
+#endif
+
+    for (; x < width; x += 2)
     {
       // We do this one color sample (aka 2 RGB pixels) at a time
       int Y1 = int(*(row_ptr++)) - 16;
